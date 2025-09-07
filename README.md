@@ -340,6 +340,144 @@ This deployment creates:
 4. **NGINX Ingress Controller**: Deployed via Helm in `ingress-nginx` namespace
 5. **Ingress Resource**: Routes external traffic to the API service
 
+### Infrastructure Diagram
+
+```mermaid
+graph TB
+    subgraph "Host Machine"
+        User[👤 User]
+        Browser[🌐 Browser]
+        Terminal[💻 Terminal/curl]
+        Docker[🐳 Docker Engine]
+    end
+    
+    subgraph "KinD Cluster (tf-kind)"
+        subgraph "Docker Container: tf-kind-control-plane"
+            subgraph "Kubernetes Control Plane"
+                API_Server[🎛️ API Server]
+                ETCD[🗃️ etcd]
+                Scheduler[📋 Scheduler]
+                Controller[🎮 Controller Manager]
+            end
+            
+            subgraph "ingress-nginx namespace"
+                IngressController[🚦 NGINX Ingress Controller<br/>nginx-ingress-ingress-nginx-controller<br/>Port: 80/443<br/>NodePort: 30080/30443]
+            end
+            
+            subgraph "default namespace"
+                subgraph "API Deployment"
+                    Pod1[🐍 API Pod 1<br/>api-6d7dfb76dc-xxxxx<br/>Container: local/api:dev<br/>Port: 8080]
+                    Pod2[🐍 API Pod 2<br/>api-6d7dfb76dc-yyyyy<br/>Container: local/api:dev<br/>Port: 8080]
+                end
+                
+                Service[⚖️ ClusterIP Service<br/>api-svc<br/>Port: 8080]
+                IngressResource[📋 Ingress Resource<br/>api-ing<br/>Rules: / → api-svc:8080]
+            end
+        end
+    end
+    
+    %% Traffic Flow Connections
+    User --> Browser
+    User --> Terminal
+    
+    Browser -->|HTTP Request<br/>localhost:8080/health| PortForward
+    Terminal -->|curl localhost:8080/time| PortForward
+    
+    PortForward[🔀 kubectl port-forward<br/>8080:80] -->|Forwards to| IngressController
+    
+    IngressController -->|Routes based on<br/>Ingress rules| IngressResource
+    IngressResource -->|Backend service| Service
+    Service -->|Load balances| Pod1
+    Service -->|Load balances| Pod2
+    
+    %% Docker relationship
+    Docker -.->|Runs| KinD_Container[KinD Container]
+    
+    %% Terraform management
+    Terraform[🏗️ Terraform] -.->|Manages| IngressController
+    Terraform -.->|Manages| Pod1
+    Terraform -.->|Manages| Pod2
+    Terraform -.->|Manages| Service
+    Terraform -.->|Manages| IngressResource
+    
+    %% Response flow (dotted lines)
+    Pod1 -.->|JSON Response| Service
+    Pod2 -.->|JSON Response| Service
+    Service -.->|Response| IngressResource
+    IngressResource -.->|Response| IngressController
+    IngressController -.->|Response| PortForward
+    PortForward -.->|Response| Browser
+    PortForward -.->|Response| Terminal
+    
+    %% Styling
+    classDef userClass fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef k8sClass fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef podClass fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    classDef ingressClass fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef terraformClass fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    
+    class User,Browser,Terminal userClass
+    class API_Server,ETCD,Scheduler,Controller,Service,IngressResource k8sClass
+    class Pod1,Pod2 podClass
+    class IngressController,PortForward ingressClass
+    class Terraform terraformClass
+```
+
+### Traffic Flow Sequence
+
+```mermaid
+sequenceDiagram
+    participant U as 👤 User
+    participant B as 🌐 Browser
+    participant PF as 🔀 Port Forward
+    participant IC as 🚦 NGINX Ingress
+    participant IR as 📋 Ingress Resource
+    participant SVC as ⚖️ Service (api-svc)
+    participant P1 as 🐍 API Pod 1
+    participant P2 as 🐍 API Pod 2
+    
+    Note over U,P2: GET /health Request Flow
+    
+    U->>B: Open localhost:8080/health
+    B->>PF: HTTP GET localhost:8080/health
+    Note over PF: kubectl port-forward<br/>8080:80
+    PF->>IC: Forward to port 80
+    Note over IC: NGINX Ingress Controller<br/>ingress-nginx namespace
+    IC->>IR: Check routing rules
+    Note over IR: Path: / → api-svc:8080
+    IR->>SVC: Route to backend service
+    Note over SVC: ClusterIP Service<br/>Load balancer
+    
+    alt Load balance to Pod 1
+        SVC->>P1: Forward request
+        Note over P1: FastAPI app on port 8080
+        P1->>SVC: {"status": "ok"}
+    else Load balance to Pod 2
+        SVC->>P2: Forward request
+        Note over P2: FastAPI app on port 8080
+        P2->>SVC: {"status": "ok"}
+    end
+    
+    SVC->>IR: Return response
+    IR->>IC: Forward response
+    IC->>PF: HTTP response
+    PF->>B: JSON response
+    B->>U: Display: {"status": "ok"}
+    
+    Note over U,P2: Complete request-response cycle
+```
+
+### Component Details
+
+| Component | Type | Purpose | Access |
+|-----------|------|---------|---------|
+| **User** | Human | Initiates requests | Browser/Terminal |
+| **kubectl port-forward** | Process | Tunnel traffic into cluster | localhost:8080 → pod:80 |
+| **NGINX Ingress Controller** | Pod | HTTP/HTTPS proxy and load balancer | Deployed via Helm |
+| **Ingress Resource** | K8s Object | Routing rules configuration | Path-based routing |
+| **Service (api-svc)** | K8s Object | Internal load balancer | ClusterIP, port 8080 |
+| **API Pods** | Containers | FastAPI application instances | 2 replicas, local/api:dev |
+
 The traffic flow is:
 ```
 Browser → localhost:8080 → Port Forward → NGINX Ingress Controller → API Service → API Pods
